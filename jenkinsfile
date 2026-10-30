@@ -1,0 +1,103 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKERHUB_REPO = 'shivanksharma070/blood-bank'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Validate Python') {
+            steps {
+                sh '''
+                    python -m py_compile \
+                        app/v1/app.py \
+                        app/v2/app.py \
+                        app/v3/app.py
+                '''
+            }
+        }
+
+        stage('Build Docker Images') {
+            steps {
+                sh '''
+                    docker build --build-arg APP_VERSION=v1 \
+                        -t ${DOCKERHUB_REPO}:v1 .
+
+                    docker build --build-arg APP_VERSION=v2 \
+                        -t ${DOCKERHUB_REPO}:v2 .
+
+                    docker build --build-arg APP_VERSION=v3 \
+                        -t ${DOCKERHUB_REPO}:v3 .
+                '''
+            }
+        }
+
+        stage('Push Docker Images') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+
+                        echo "$DOCKER_PASS" | docker login \
+                            -u "$DOCKER_USER" --password-stdin
+
+                        docker push ${DOCKERHUB_REPO}:v1
+                        docker push ${DOCKERHUB_REPO}:v2
+                        docker push ${DOCKERHUB_REPO}:v3
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Kubernetes') {
+            steps {
+                sh '''
+                    kubectl apply -f kubernetes/all.yaml
+
+                    kubectl rollout restart deployment/blood-bank-v1
+                    kubectl rollout restart deployment/blood-bank-v2
+                    kubectl rollout restart deployment/blood-bank-v3
+
+                    kubectl rollout status deployment/blood-bank-v1 --timeout=180s
+                    kubectl rollout status deployment/blood-bank-v2 --timeout=180s
+                    kubectl rollout status deployment/blood-bank-v3 --timeout=180s
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    kubectl get deployments
+                    kubectl get services
+                    kubectl get pods
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Blood Bank CI/CD Pipeline completed successfully!'
+        }
+
+        failure {
+            echo 'Blood Bank CI/CD Pipeline failed!'
+        }
+    }
+}
